@@ -1,14 +1,13 @@
-import glob
-import os
-import mne
-import numpy as np
-import pandas as pd
 from torch.utils.data import Dataset, DataLoader, random_split
-from sklearn.model_selection import train_test_split
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+import random
+from utils import *
+import numpy as np
 import torch
 
+import warnings
+warnings.filterwarnings(action='ignore')
 
 class TorchDataset(Dataset):  # Parsing + ToTensor
     def __init__(self, transform=None):
@@ -20,6 +19,7 @@ class TorchDataset(Dataset):  # Parsing + ToTensor
         self.data_path = data_path  # len: 2535
         self.mask_path = mask_path  # len: 2535
         self.split = {'SSL': 0.7, 'Tuning': 0.2, 'Eval': 0.1}
+
 
         self.data_x, self.data_y = self.parser(self.data_path, self.mask_path)
 
@@ -37,41 +37,36 @@ class TorchDataset(Dataset):  # Parsing + ToTensor
             total_x.append(x)
             total_y.append(y)
         total_x, total_y = np.concatenate(total_x), np.concatenate(total_y)
-        return total_x, total_y  # 전체 파싱한 데이터셋
 
+        return total_x, total_y  # 전체 파싱한 데이터셋
 
     def __len__(self):
         return len(self.data_y)
 
     def __getitem__(self, item):  # 샘플마다 데이터 로드
-        x = torch.tensor(self.data_x[item], dtype=torch.float)  # 각 sample 데이터와 label 반환
+        x = torch.tensor(self.data_x[item], dtype=torch.float)  # (개수, size, channel) -> (개수, channel, size)로 변경
         y = torch.tensor(self.data_y[item], dtype=torch.float)
+
+        x = x.transpose(1, 2)
+        y = y.transpose(1, 2)
         return x, y
 
 
+# # 전체 x: (243207, 3000, 4), y: (243207, 3000, 1)
+dataset = TorchDataset(transform=None)
+train_data, tuning_data, eval_data = random_split(dataset,
+                                                  [dataset.split['SSL'],
+                                                   dataset.split['Tuning'],
+                                                   dataset.split['Eval']])  # ratio or length
+x_train = train_data.dataset[train_data.indices] # [0] : x, [1] : y
 
-if __name__ == '__main__':
-    base_path = os.path.join(os.getcwd(), '..', 'shhs2_o')
-    data_path = sorted(glob.glob(os.path.join(base_path, '**/*data.parquet')))  # len: 2535
-    mask_path = sorted(glob.glob(os.path.join(base_path, '**/*mask.parquet')))  # len: 2535
-
-    dataset = TorchDataset(transform=None)  # class 안에서 파싱 함수 사용하였음
-    train_data, tuning_data, eval_data = random_split(dataset,
-                                                      [dataset.split['SSL'],
-                                                       dataset.split['Tuning'],
-                                                       dataset.split['Eval']])
-
-    train_dataloader = DataLoader(train_data, batch_size=64, shuffle=True)
-    tuning_dataloader = DataLoader(tuning_data, batch_size=64, shuffle=True)
-    eval_dataloader = DataLoader(eval_data, batch_size=64, shuffle=True)
-
-    # 전체 x: (243207, 3000, 4), y: (243207, 3000, 1)
-    print("Train: ", len(train_data))  # 170245
-    print("Tuning: ", len(tuning_data))  # 48642
-    print("Eval: ", len(eval_data))  # 24320
+# print("Train: ", len(train_data))  # 170245
+# print("Tuning: ", len(tuning_data))  # 48642
+# print("Eval: ", len(eval_data))  # 24320
+#
+# print(train_dataloader)
+# print(tuning_dataloader)
+# print(eval_dataloader)
 
 
-    print(train_dataloader)
-    print(tuning_dataloader)
-    print(eval_dataloader)
 
