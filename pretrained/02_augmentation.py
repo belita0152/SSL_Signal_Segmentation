@@ -79,7 +79,7 @@ class SigAugmentation(object):
         if random.random() < p:
             start = start_list[torch.randint(0, len(start_list), (1,), device=x.device)].item()  # 무작위로 start point 1개 선택
             width = width_list[torch.randint(0, len(width_list), (1,), device=x.device)].item()  # 무작위로 width 1개 선택
-            print(start, width)
+            # print(start, width)
 
             # 평균값 계산
             mean_value = x.mean().item()
