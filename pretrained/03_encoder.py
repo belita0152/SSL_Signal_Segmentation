@@ -2,10 +2,10 @@
 Image/SimCLR => Base Encoder = ResNet
 EEG/Segmentation/SimCLR => Base Encoder = VGGNet
 """
+
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import pickle
+from torch.utils.data import Dataset
 
 
 # Tuple (train_data) -> x_train, y_train으로 분리
@@ -26,61 +26,38 @@ class VGG(nn.Module):
         super(VGG, self).__init__()
 
         self.enc1 = nn.Sequential(
-            nn.Conv1d(in_channels, 64, kernel_size=3, padding=1),
+            nn.Conv1d(in_channels, 32, kernel_size=3, padding=1),
+            nn.BatchNorm1d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(32, 48, kernel_size=3, padding=1),
+            nn.BatchNorm1d(48),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            nn.Conv1d(48, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
             nn.ReLU(inplace=True),
-            nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-
-        self.enc2 = nn.Sequential(
             nn.Conv1d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm1d(128),
             nn.ReLU(inplace=True),
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-
-        self.enc3 = nn.Sequential(
+            nn.MaxPool1d(kernel_size=2, stride=2),
             nn.Conv1d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.Conv1d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
             nn.MaxPool1d(kernel_size=2, stride=2)
         )
 
-        self.enc4 = nn.Sequential(
-            nn.Conv1d(256, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
+        self.final_length = self.get_final_length(in_channels, 3000)
+
+    def get_final_length(self, channel_size, input_size):
+        x = torch.randn(1, channel_size, input_size)
+        x = self.forward(x)
+        return x.view(-1).shape[0]
+
 
     def forward(self, x):
         x1 = self.enc1(x)
-        x2 = self.enc2(x1)
-        x3 = self.enc3(x2)
-        # x4 = self.enc4(x3)
 
-        return x3
+        return x1
 
 
 class ResNet(nn.Module):
