@@ -1,7 +1,6 @@
 from torch.utils.data import Dataset, DataLoader, random_split
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
-import random
 from utils import *
 import numpy as np
 import torch
@@ -44,21 +43,21 @@ class TorchDataset(Dataset):  # Parsing + ToTensor
         return len(self.data_y)
 
     def __getitem__(self, item):  # 샘플마다 데이터 로드
-        x = torch.tensor(self.data_x[item], dtype=torch.float)  # (개수, size, channel) -> (개수, channel, size)로 변경
+        x = torch.tensor(self.data_x[item], dtype=torch.float)
         y = torch.tensor(self.data_y[item], dtype=torch.float)
 
-        x = x.transpose(1, 2)
-        y = y.transpose(1, 2)
+        x = x.transpose(0, 1)  # (time, channel) -> (channel, time)로 변경
+        y = y.transpose(0, 1)
         return x, y
 
 
 # # 전체 x: (243207, 3000, 4), y: (243207, 3000, 1)
-dataset = TorchDataset(transform=None)
-train_data, tuning_data, eval_data = random_split(dataset,
-                                                  [dataset.split['SSL'],
-                                                   dataset.split['Tuning'],
-                                                   dataset.split['Eval']])  # ratio or length
-x_train = train_data.dataset[train_data.indices] # [0] : x, [1] : y
+# dataset = TorchDataset(transform=None)
+# train_data, tuning_data, eval_data = random_split(dataset,
+#                                                   [dataset.split['SSL'],
+#                                                    dataset.split['Tuning'],
+#                                                    dataset.split['Eval']])  # ratio or length
+# x_train = train_data.dataset[train_data.indices] # [0] : x, [1] : y
 
 # print("Train: ", len(train_data))  # 170245
 # print("Tuning: ", len(tuning_data))  # 48642
