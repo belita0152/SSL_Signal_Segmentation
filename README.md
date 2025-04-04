@@ -1,4 +1,4 @@
-## 25. 4. 3
+## 25. 4. 3 - 전체 샘플 섞인 상태
 batch_size=64, train_epochs=10, lr=1e-5<br/>
 [Epoch] : 1 	 [Train Loss] : 4.7238 	 <br/>
 [Epoch] : 2 	 [Train Loss] : 4.2834 	 <br/>
@@ -11,7 +11,7 @@ batch_size=64, train_epochs=10, lr=1e-5<br/>
 [Epoch] : 9 	 [Train Loss] : 3.6827 	 <br/>
 [Epoch] : 10 	 [Train Loss] : 3.6268 	 <br/>
 
-## 25. 4. 3
+## 25. 4. 3 - 전체 샘플 섞인 상태
 batch_size=1024, train_epochs=200, lr=1e-5<br/>
 [Epoch] : 1 	 [Train Loss] : 8.4175 	 <br/>
 [Epoch] : 2 	 [Train Loss] : 8.1751 	 <br/>
@@ -213,3 +213,6 @@ batch_size=1024, train_epochs=200, lr=1e-5<br/>
 [Epoch] : 198 	 [Train Loss] : 5.9367 	 <br/>
 [Epoch] : 199 	 [Train Loss] : 6.0483 	 <br/>
 [Epoch] : 200 	 [Train Loss] : 6.0611 <br/>
+
+## 25. 4. 4 - subject 단위로 데이터 나눈 상태
+batch_size=1024, train_epochs=200, lr=1e-5<br/>
