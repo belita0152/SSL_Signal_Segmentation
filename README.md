@@ -214,5 +214,5 @@ batch_size=1024, train_epochs=200, lr=1e-5<br/>
 [Epoch] : 199 	 [Train Loss] : 6.0483 	 <br/>
 [Epoch] : 200 	 [Train Loss] : 6.0611 <br/>
 
-## 25. 4. 4 - subject 단위로 데이터 나눈 상태
+## 25. 4. 4 - subject 단위로 데이터 나눈 상태 -> 이걸로 모델 저장했음
 batch_size=1024, train_epochs=200, lr=1e-5<br/>
