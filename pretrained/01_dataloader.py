@@ -68,4 +68,26 @@ class TorchDataset(Dataset):  # Parsing + ToTensor
 # print(eval_dataloader)
 
 
+import os
+import glob
+
+# 0. Data Path
+base_path = os.path.join(os.getcwd(), '..', 'shhs2_o')
+data_path = sorted(glob.glob(os.path.join(base_path, '**/*data.parquet')))  # len: 2535
+mask_path = sorted(glob.glob(os.path.join(base_path, '**/*mask.parquet')))  # len: 2535
+
+# 1. Split data/mask path
+split_ratio = {'SSL': 0.7, 'Tuning': 0.2, 'Eval': 0.1}
+dataset = len(data_path)
+n_train = int(dataset * split_ratio['SSL'])
+n_tuning = int(dataset * split_ratio['Tuning'])
+n_eval = dataset - n_train - n_tuning
+
+train_data_path = data_path[0:n_train]
+tuning_data_path = data_path[n_train:(n_train+n_tuning)]
+eval_data_path = data_path[(n_train+n_tuning):]
+
+train_mask_path = mask_path[0:n_train]
+tuning_mask_path = mask_path[n_train:(n_train+n_tuning)]
+eval_mask_path = mask_path[(n_train+n_tuning):]
 
