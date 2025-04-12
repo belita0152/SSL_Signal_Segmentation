@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch import optim
 
 from torch.utils.tensorboard import SummaryWriter
-log_dir = './log'
+log_dir = './logdir'
 writer = SummaryWriter(log_dir=log_dir)
 
 device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
@@ -113,7 +113,8 @@ def get_performance(pred, true, n_classes, smooth):
         pred = torch.argmax(pred, dim=1)
 
         for cls in range(n_classes):
-            pred_c = pred[:, cls, :]  # [B, L]
+            pred_c = pred
+            # pred_c = pred[:, cls, :]  # [B, L]
             real_c = real[:, cls, :]  # [B, L]
 
             intersection = (pred_c * real_c).sum()
@@ -173,7 +174,7 @@ for epoch in range(args.finetuning_epochs):
         out = model(x)  # torch.Size([1024, 6, 1655])
         y = crop_target_to_match(y, out.shape[2]).long()
 
-        loss, dice_loss, total_loss = get_loss(out, y, 0.1, 1e-4)
+        loss, dice_loss, total_loss = get_loss(out, y, 0.01, 1e-4)
 
         total_loss.backward()
         optimizer.step()
@@ -207,8 +208,8 @@ for epoch in range(args.finetuning_epochs):
         # out = torch.argmax(out, dim=1)  # point 별 최빈값을 predict로 출력. torch.Size([1024, 1655])
         y = crop_target_to_match(y, out.shape[2]).long()
 
-        loss, dice_loss, total_loss = get_loss(out, y, 0.1, 1e-6)
-        dice, miou, pixel_acc = get_performance(out, y, args.n_classes, 1e-6)
+        loss, dice_loss, total_loss = get_loss(out, y, 0.01, 1e-4)
+        dice, miou, pixel_acc = get_performance(out, y, args.n_classes, 1e-4)
 
         epoch_test_loss.append(loss.detach().cpu().item())
         epoch_test_dice_loss.append(dice_loss.detach().cpu().item())
