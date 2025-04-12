@@ -11,6 +11,10 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 from torch import optim
 
+from torch.utils.tensorboard import SummaryWriter
+log_dir = './log'
+writer = SummaryWriter(log_dir=log_dir)
+
 device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 with open('tuning_x.pkl', 'rb') as f:
@@ -84,8 +88,6 @@ def get_loss(pred, real, w, smooth):
     # 3. Total Loss (weighted)
     total_loss = loss * w + dice_loss
 
-    # total_loss = ce + dice_loss
-
     return loss, dice_loss, total_loss
 
 
@@ -107,6 +109,9 @@ def get_performance(pred, true, n_classes, smooth):
 
     # 2. mIoU
     def get_iou(pred, real, n_classes):
+        iou_per_class = []
+        pred = torch.argmax(pred, dim=1)
+
         for cls in range(n_classes):
             pred_c = pred[:, cls, :]  # [B, L]
             real_c = real[:, cls, :]  # [B, L]
@@ -114,8 +119,11 @@ def get_performance(pred, true, n_classes, smooth):
             intersection = (pred_c * real_c).sum()
             union = pred_c.sum() + real_c.sum() - intersection
 
-            iou_per_class = []
-            iou_score = intersection / union
+            if union == 0:
+                iou_score = torch.tensor(float('nan'))
+            else:
+                iou_score = intersection / union
+
             iou_per_class.append(iou_score.detach().cpu().numpy())
 
         miou_score = np.nanmean(np.array(iou_per_class))
@@ -143,7 +151,8 @@ tuning_dataloader = DataLoader(tuning_dataset, batch_size=args.batch_size, shuff
 eval_dataset = TupleDataset(eval_x, eval_y)
 eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=True)
 
-model = UNet(num_classes=args.n_classes)  # class 안에서 freeze backbone
+enc_path = '/home/lhy/SSL_Signal_Segmentation/pretrained/checkpoint_VGG_enc/VGG_encoder_epoch82.pth'
+model = UNet(num_classes=args.n_classes, encoder_ckpt=enc_path)  # class 안에서 freeze backbone
 model = model.to(device)
 
 criterion = nn.CrossEntropyLoss(reduction='mean')  # softmax + CrossEntropy
@@ -164,7 +173,7 @@ for epoch in range(args.finetuning_epochs):
         out = model(x)  # torch.Size([1024, 6, 1655])
         y = crop_target_to_match(y, out.shape[2]).long()
 
-        loss, dice_loss, total_loss = get_loss(out, y, 0.1, 1e-6)
+        loss, dice_loss, total_loss = get_loss(out, y, 0.1, 1e-4)
 
         total_loss.backward()
         optimizer.step()
@@ -172,7 +181,7 @@ for epoch in range(args.finetuning_epochs):
         epoch_dice_loss.append(dice_loss.detach().cpu().item())
         epoch_total_loss.append(total_loss.detach().cpu().item())
 
-        dice, miou, pixel_acc = get_performance(out, y, args.n_classes, smooth=1e-6)
+        dice, miou, pixel_acc = get_performance(out, y, args.n_classes, smooth=1e-4)
         epoch_dice_score.append(dice)
         epoch_miou.append(miou)
         epoch_pixel_acc.append(pixel_acc)
@@ -242,3 +251,12 @@ for epoch in range(args.finetuning_epochs):
                                         epoch_test_pixel_acc,
                                         epoch_test_miou,
                                         epoch_test_dice))
+
+
+    writer.add_scalar('Train/Loss/Epoch', epoch_train_total_loss, epoch+1)
+    writer.add_scalar('Eval/Loss/Epoch', epoch_test_total_loss, epoch+1)
+    writer.add_scalar('Eval/mPA/Epoch', epoch_test_pixel_acc, epoch+1)
+    writer.add_scalar('Eval/mIoU/Epoch', epoch_test_miou, epoch+1)
+    writer.add_scalar('Eval/Dice/Epoch', epoch_test_dice, epoch+1)
+
+writer.close()
