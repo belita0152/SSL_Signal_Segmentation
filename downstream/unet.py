@@ -7,19 +7,25 @@ import torch
 import torch.nn as nn
 from pretrained.encoder import VGG
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-#
-def get_pretrained_model():
+
+
+def get_pretrained_model(load_path=None):
     model = VGG(in_channels=4, num_classes=6)
+
+    if load_path is not None:
+        ckpt = torch.load(load_path, map_location=device)  # encoder only
+        model.load_state_dict(ckpt, strict=True)
+
     for param in model.parameters():
         param.requires_grad = False
 
     return model
 
 class UNet(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, encoder_ckpt):
         super(UNet, self).__init__()
         self.n_classes = num_classes
-        self.backbone = get_pretrained_model()
+        self.backbone = get_pretrained_model(load_path=encoder_ckpt)
 
         self.up1 = nn.Upsample(scale_factor=2, mode='nearest')
         self.conv1 = nn.Sequential(
