@@ -13,10 +13,7 @@ from torch.utils.data import DataLoader
 import torch.nn as nn
 from torch import optim
 from baseline.segmenter import Segmenter
-
-# from sklearn.decomposition import PCA
-from torch_pca import PCA
-from sklearn.neighbors import KNeighborsClassifier
+from baseline.focal_loss import FocalLoss
 from sklearn.metrics import balanced_accuracy_score, f1_score
 
 warnings.filterwarnings("ignore")
@@ -44,7 +41,7 @@ def get_args():
     parser.add_argument('--batch_size', default=128, type=int)
     parser.add_argument('--save_checkpoint', default=True, type=bool)
     parser.add_argument('--n_channels', default=4, type=int)
-    parser.add_argument('--n_classes', default=6, type=int)
+    parser.add_argument('--n_classes', default=4, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--momentum', default=0.999, type=float)
     parser.add_argument('--device', default=torch.device('cuda:1' if torch.cuda.is_available() else 'cpu'))
@@ -52,35 +49,14 @@ def get_args():
     return parser.parse_args()
 
 
-class Loss(nn.Module):
-    def __init__(self, w, gamma=2.0, alpha=0.25, reduction='mean'):
-        super(Loss, self).__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-        self.reduction = reduction
-        self.w = w
+def get_focal_loss(x, y):
+    x = x.transpose(0, 2, 1)
+    x = x.reshape(-1, x.shape[2])
+    y = y.reshape(-1)
 
-        self.loss = nn.CrossEntropyLoss().to(device)
+    loss = FocalLoss().to(args.device)
 
-    def FocalLoss(self, inputs, targets):
-       ce_loss = self.loss(inputs, targets.long())
-       pt = torch.exp(-ce_loss)  # pt = softmax probability of the true class
-       focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-
-       return focal_loss.mean()
-
-
-    def forward(self, inputs, targets):
-        # 1. Focal Loss
-        focal_loss = self.FocalLoss(inputs, targets.long())
-
-        # 2. CE Loss
-        ce_loss = self.loss(inputs, targets.long())
-
-        # 3. Total Loss
-        total_loss = focal_loss * self.w + ce_loss
-
-        return total_loss
+    return loss(x, y)
 
 
 
@@ -112,7 +88,8 @@ if __name__ == '__main__':
     model = Segmenter(n_cls=6)
     model.to(args.device)
 
-    get_loss = Loss(w=0.99)
+    # get_loss = FocalLoss(task_type='multi-label', num_classes=args.n_classes)
+    get_loss = nn.CrossEntropyLoss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
                                                            T_max=len(train_dataloader),
@@ -140,6 +117,7 @@ if __name__ == '__main__':
                 output = model(x)  # output: [16, 6, 3000] / label: [16, 3000]
 
                 loss = get_loss(output, labels)
+                # loss = get_focal_loss(output, labels)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -150,54 +128,32 @@ if __name__ == '__main__':
 
         epoch_train_loss = np.mean(np.array(epoch_train_loss))
 
-        if (epoch + 20) % 1 == 0:
-            # (2) Validation (with PCA) : https://www.datacamp.com/tutorial/principal-component-analysis-in-python
-            model.eval()
-            knn = KNeighborsClassifier(n_neighbors=6)
-            epoch_x, epoch_y = [], []
-            with torch.no_grad():
-                for batch in val_dataloader:
-                    x, y = batch
-                    x = x.to(args.device)
-                    y = y.to(args.device)
+        with torch.no_grad():
+            preds, labels = [], []
+            for batch, label in val_dataloader:
+                model.eval()
 
-                    x = model(x)
-                    x = x.reshape(x.shape[0], -1)
-                    epoch_x.append(x)
-                    epoch_y.append(y)
+                batch = batch.to(args.device)
+                label = label.long().to(args.device)
+                output = model(batch)  # [16, 6, 3000]
+                output = torch.argmax(output, dim=1)  # [16, 3000]
+                preds.append(output)
+                labels.append(label)
 
-            epoch_x, epoch_y = torch.cat(epoch_x, dim=0), torch.cat(epoch_y, dim=0).squeeze()
+            preds, labels = torch.cat(preds, dim=0), torch.cat(labels, dim=0).squeeze()
+            acc = (preds == labels).float().mean().item()
 
-            pca = PCA(n_components=50)  # torch_pca // sklearn_pca
-            epoch_x = pca.fit_transform(epoch_x)  # input : (n_samples, n_features)
+            preds, labels = preds.detach().cpu().numpy(), labels.detach().cpu().numpy()
+            preds = preds.reshape(-1)
+            labels = labels.reshape(-1)
 
-            # kNN : https://github.com/eddymina/ECG_Classification_Pytorch/blob/master/ECG_notebook.ipynb
-            epoch_x, epoch_y = epoch_x.detach().cpu().numpy(), epoch_y.detach().cpu().numpy()
-            knn.fit(epoch_x, epoch_y)
-            epoch_pred = knn.predict(epoch_x)
-
-            epoch_y = epoch_y.reshape(-1)
-            epoch_pred = epoch_pred.reshape(-1)
-
-            val_acc = balanced_accuracy_score(epoch_y, epoch_pred)
-            val_mf1 = f1_score(y_true=epoch_y, y_pred=epoch_pred, average='macro')
+            val_acc = balanced_accuracy_score(preds, labels)
+            val_mf1 = f1_score(y_true=labels, y_pred=preds, average='macro')
 
             print('[Epoch] : {0:01d} \t '
                   '[Train Loss] : {1:.4f} \t '
                   '[Accuracy] : {2:2.4f}  \t '
                   '[Macro-F1] : {3:2.4f}'.format(
                 epoch + 1, epoch_train_loss, val_acc * 100, val_mf1 * 100))
-
-            writer.add_scalar('Loss/Epoch', epoch_train_loss, epoch + 1)
-            writer.add_scalar('Val/Accuracy', val_acc * 100, epoch + 1)
-            writer.add_scalar('Val/Macro-F1', val_mf1 * 100, epoch + 1)
-            torch.save(model.state_dict(), f'{ckpt_dir}/VGG_encoder_epoch{epoch + 1}.pth')
-
-            if val_mf1 > best_f1:
-                best_f1 = val_mf1
-                best_epoch = epoch + 1
-                best_model_state = model.state_dict()
-
-                print(f'Best model: Epoch {best_epoch} with [Macro-F1] {best_f1:.4f}')  # 이 경우에 모델 저장하도록 코드 수정
 
     writer.close()
