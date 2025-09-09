@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Tuple, List, Dict
+
 from timm.models.layers import DropPath, trunc_normal_
 from einops import rearrange
 
-
 # Patch Embedding
 class PatchEmbedding(nn.Module):
-    def __init__(self, data_size: Tuple[int, int], patch_size: Tuple[int, int], embed_dim, channels=1):
+    def __init__(self, data_size: Tuple[int, int], patch_size: Tuple[int, int], embed_dim, channels=2):
         super().__init__()
 
         self.data_size = data_size
@@ -21,7 +21,7 @@ class PatchEmbedding(nn.Module):
         )
 
     def forward(self, x):
-        x = self.proj(x).flatten(2).transpose(1, 2)  # (1, 128, 4, 300) -> (1, 1200, 128)
+        x = self.proj(x).flatten(2).transpose(1, 2)  # [128, 256, 1, 300] -> [128, 300, 256]
         return x
 
 
@@ -111,20 +111,19 @@ class Attention(nn.Module):
 class VisionTransformer(nn.Module):
     def __init__(
         self,
-        data_size: Tuple[int, int],
-        patch_size: Tuple[int, int],
         n_layers,
         d_model,
         d_ff,
         n_heads,
         n_cls,
+        patch_size,
+        num_patches,
         dropout=0.1,
         drop_path_rate=0.0,
-        channels=1,
     ):
         super().__init__()
-        self.patch_embed = PatchEmbedding(data_size, patch_size, d_model, channels)
-        self.patch_size = self.patch_embed.patch_size
+        self.patch_size = patch_size
+        self.num_patches = num_patches
         self.n_layers = n_layers
         self.d_model = d_model
         self.d_ff = d_ff
@@ -135,7 +134,7 @@ class VisionTransformer(nn.Module):
         # cls and pos tokens
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         self.pos_embed = nn.Parameter(
-            torch.randn(1, self.patch_embed.num_patches + 1, d_model)
+            torch.randn(1, self.num_patches + 1, d_model)
         )
 
         # transformer blocks
@@ -155,17 +154,18 @@ class VisionTransformer(nn.Module):
 
 
     def forward(self, x, return_features=False):
-        B, _, _ = x.shape
-        x = torch.unsqueeze(x, 1)
-        x = self.patch_embed(x)  # torch.Size([1, 1200, 128])
+        B, C, T = x.shape  # [176, 4, 3000]
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # torch.Size([1, 1, 128])
 
         x = torch.cat((cls_tokens, x), dim=1)  # torch.Size([1, 1201, 128])
 
         pos_embed = self.pos_embed
+        print(x.shape)
+        print(pos_embed.shape)
 
         x = x + pos_embed
+
         x = self.dropout(x)
 
         for blk in self.blocks:
@@ -249,22 +249,38 @@ class Segmenter(nn.Module):
     def __init__(
         self,
         n_cls,
+        columns_names: List[str],
+        data_size: Tuple[int, int],
+        patch_size: Tuple[int, int],
+        flag = False
     ):
         super().__init__()
+        self.flag = flag
         self.n_cls = n_cls
-        self.encoder = VisionTransformer(data_size=(4, 3000),
-                            patch_size=(1, 10),
-                            n_layers=1,
+        self.patch_size = patch_size
+
+        self.columns_names = columns_names
+
+        self.patch_embed1 = PatchEmbedding(data_size, patch_size, embed_dim=128, channels=2)
+        self.patch_embed2 = nn.ModuleDict({
+            column: PatchEmbedding(data_size, patch_size, embed_dim=128, channels=2)
+            for column in columns_names
+        })
+
+        num_patches = (data_size[0] // patch_size[0]) * (data_size[1] // patch_size[1])
+        self.encoder = VisionTransformer(  # heartbeat -> 625 / ahi -> 3000
+                            n_layers=12,
                             d_model=128,
                             d_ff=64,
                             n_heads=8,
-                            n_cls=6,
+                            n_cls=n_cls,
+                            patch_size=patch_size,
+                            num_patches=num_patches,
                             dropout=0.1,
-                            drop_path_rate=0.0,
-                            channels=1)
+                            drop_path_rate=0.0)
         self.patch_size = self.encoder.patch_size
-        self.decoder = MaskTransformer(n_cls=6,
-                              patch_size=(1, 10),
+        self.decoder = MaskTransformer(n_cls=n_cls,
+                              patch_size=patch_size,
                               d_encoder=128,
                               n_layers=1,
                               n_heads=8,
@@ -274,11 +290,22 @@ class Segmenter(nn.Module):
                               dropout=0.1)
         self.gap_layer = nn.AdaptiveAvgPool2d((None, 1))
 
-    def forward(self, x):
-        N, C, T = x.shape
+    def forward(self, x: Dict):
+        if self.flag:  # True
+            total_x = []
+            for column_name, data in x.items():
+                x = self.patch_embed2[column_name](data)
+                total_x.append(x)
+            total_x = torch.cat(total_x, dim=1)
+            B, C, T = total_x.shape  # [176, 4, 3000]
+            x = torch.unsqueeze(total_x, 2)  # (176, 4, 1, 3000)
 
+        else:
+            B, C, T = x.shape  # [176, 4, 3000]
+            x = torch.unsqueeze(x, 2)  # (176, 4, 1, 3000)
+
+        x = self.patch_embed1(x)  # [176, 300, 128]
         x = self.encoder(x, return_features=True)
-
         x = x[:, 1:]  # remove CLS tokens for decoding
 
         masks = self.decoder(x, (C, T))
@@ -290,26 +317,9 @@ class Segmenter(nn.Module):
 
 
 if __name__ == "__main__":
-    model = Segmenter(n_cls=6)
+    model = Segmenter(n_cls=2, patch_size=(1, 10), data_size=(1, 1000), columns_names=['AIRFLOW', 'THOR RES', 'ABDO RES', 'SaO2'])
 
-    import os
-    import glob
-
-    split_ratio = {'Train': 0.65, 'Val': 0.05}
-    base_path = os.path.join(os.getcwd(), '../../../../data/segmentation/shhs2_o')
-    data_path = sorted(glob.glob(os.path.join(base_path, '**/*data.parquet')))  # len: 2535
-    mask_path = sorted(glob.glob(os.path.join(base_path, '**/*mask.parquet')))  # len: 2535
-
-    # 2. Split into train / tuning / evaluation partitions
-    train_size = int(len(data_path) * split_ratio['Train'])
-    train_data_path = data_path[0:train_size]
-    train_mask_path = mask_path[0:train_size]
-
-    from pretrained.dataloader import TorchDataset
-    train_data = TorchDataset(data_dir=train_data_path[:2], mask_dir=train_mask_path[:2], transform=None)
-
-    x, y = train_data.data_x, train_data.data_y
-    x = torch.tensor(x, dtype=torch.float32)
-
-    x_ = model(x)
+    x_ = model(
+        torch.randn(4, 2, 1250),
+    )
     print(x_.shape)
