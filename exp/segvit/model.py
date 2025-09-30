@@ -197,24 +197,22 @@ class VisionTransformer(nn.Module):
 #           return (mask, updated_class_tokens)
 # ------------------------------
 
-class CrossAttention(nn.Module):
+class Attention_(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
         self.scale = qk_scale or head_dim ** -0.5
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)  # q 따로
         self.k = nn.Linear(dim, dim, bias=qkv_bias)  # k 따로
-        self.v = nn.Linear(dim, dim, bias=qkv_bias)  # v 따로 => cross-attention 구조
-
+        self.v = nn.Linear(dim, dim, bias=qkv_bias)  # v 따로
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, xq, xk, xv):
-        B, Nq, C = xq.size()
+        B, Nq, C = xq.transpose(0, 1).shape
         Nk = xk.size()[1]
         Nv = xv.size()[1]
 
@@ -240,7 +238,7 @@ class TPN_DecoderLayer(TransformerDecoderLayer):
     def __init__(self, **kwargs):
         super(TPN_DecoderLayer, self).__init__(**kwargs)
         del self.multihead_attn
-        self.multihead_attn = CrossAttention(
+        self.multihead_attn = Attention_(
             kwargs['d_model'], num_heads=kwargs['nhead'], qkv_bias=True, attn_drop=0.1
         )  # 기본 Transformer Decoder의 Attention 모듈을 SegViT 모델에 맞게 교체
 
@@ -263,8 +261,7 @@ class TPN_DecoderLayer(TransformerDecoderLayer):
         tgt = self.norm1(tgt)
 
         # (2) cross-attention (q=class tokens, key/values=encoder memory)
-        tgt2, attn2 = self.multihead_attn(
-            tgt.transpose(0, 1), memory.transpose(0, 1), memory.transpose(0, 1))
+        tgt2, attn2 = self.multihead_attn(tgt, memory, memory)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
@@ -304,123 +301,70 @@ class TPN_Decoder(TransformerDecoder):
         return output, attn  # 실제 구현에서는 마지막 decoder layer의 sim map을 사용
 
 
-# Decoder
+# ATM Module
 class ATMHead(nn.Module):
     def __init__(
             self,
-            data_size,
-            in_channels,
-            num_classes,
-            embed_dims=768,
-            num_layers=3,
-            num_heads=8,
-            use_stages=3,
-            use_proj=True,
-            CE_loss=False,
-            crop_train=False,
-            shrink_ratio=None,
-            **kwargs,
+            in_channels: int,
+            num_classes: int,
+            embed_dim: int,
+            num_layers: int = 2,
+            num_heads: int = 8,
     ):
 
         super().__init__()
-
-        self.data_size = data_size
         self.in_channels = in_channels
         self.num_classes = num_classes
-        self.use_stages = use_stages
-        self.crop_train = crop_train
 
-        nhead = num_heads
-        dim = embed_dims
-        input_proj = []
-        proj_norm = []
-        atm_decoders = []
+        # Encoder output dim -> Decoder input dim
+        self.input_proj = nn.Linear(in_channels, embed_dim)
+        self.proj_norm = nn.LayerNorm(embed_dim)
 
-        # stage별 projection + norm + decoder
-        for i in range(self.use_stages):
-            # 1. projection layer (FC layer to change ch)
-            if use_proj:
-                proj = nn.Linear(self.in_channels, dim)
-                trunc_normal_(proj.weight, std=.02)
-            else:
-                proj = nn.Identity()
-            input_proj.append(proj)
+        # Transformer decoder
+        decoder_layer = TPN_DecoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=embed_dim * 4)
+        self.decoder = TPN_Decoder(decoder_layer, num_layers)
 
-            # 2. normalization layer
-            if use_proj:
-                norm = nn.LayerNorm(dim)
-            else:
-                norm = nn.Identity()
-            proj_norm.append(norm)
+        # Learnable class queries
+        self.q_embed = nn.Embedding(num_classes, embed_dim)
 
-            # 3. decoder layer
-            decoder_layer = TPN_DecoderLayer(d_model=dim, nhead=nhead, dim_feedforward=dim * 4)
-            decoder = TPN_Decoder(decoder_layer, num_layers)
-            atm_decoders.append(decoder)
+        # Final classification (class embedding)
+        self.class_embed = nn.Linear(embed_dim, num_classes + 1)
 
-        self.input_proj = nn.ModuleList(input_proj)
-        self.proj_norm = nn.ModuleList(proj_norm)
-        self.decoder = nn.ModuleList(atm_decoders)
-        self.q = nn.Embedding(self.num_classes, dim)
+    def forward(self, inputs: torch.Tensor):
+        B, L, C = inputs.shape
 
-        self.class_embed = nn.Linear(dim, self.num_classes + 1)
-        self.CE_loss = CE_loss
+        # (1) projection
+        enc_memory = self.input_proj(inputs)
+        enc_memory = self.proj_norm(enc_memory)
 
-    def forward(self, inputs):
-        x = []
-        for stage_ in inputs[:self.use_stages]:
-            x.append(self.d4_to_d3(stage_) if stage_.dim() > 3 else stage_)
-        x.reverse()
+        # (2) query init
+        q = self.q_embed.weight.unsqueeze(1).repeat(1, B, 1)
 
-        bs = x[0].size()[0]
-        laterals = []
-        attns = []
-        maps_size = []
-        qs = []
+        # (3) transformer decoder
+        q, attn = self.decoder(q, enc_memory)
+        q = q.transpose(0, 1)
 
-        # init class tokens (query)
-        q = self.q.weight.repeat(bs, 1, 1).transpose(0, 1)
+        # (4) class prediction
+        pred_logits = self.class_embed(q)
 
-        for idx, (x_, proj_, norm_, decoder_) in enumerate(zip(x, self.input_proj, self.proj_norm, self.decoder)):
-            lateral = norm_(proj_(x_))
-            laterals.append(lateral)
+        # (5) mask prediction
+        pred_masks = attn
 
-            q, attn = decoder_(q, lateral.transpose(0, 1))
-            attn = attn.transpose(-1, -2)
+        # (6) inference mode
+        pred = self.semantic_inference(pred_logits, pred_masks)
 
-            attn = attn.permute(0, 2, 1)  #  (B, L, C) -> (B, C, L) for 1D signals
-            maps_size.append(attn.size()[-2:])
-            qs.append(q.transpose(0, 1))
-            attns.append(attn)
-
-        qs = torch.stack(qs, dim=0)
-        outputs_class = self.class_embed(qs)
-        out = {"pred_logits": outputs_class[-1]}
-
-        outputs_seg_masks = []
-        size = maps_size[-1][-1]  # torch.Size([3, 150]) -> 150
-        print(size)
-
-        for i_attn, attn in enumerate(attns):
-            if i_attn == 0:
-                outputs_seg_masks.append(F.interpolate(attn, size=size, mode='linear', align_corners=False))
-            else:
-                outputs_seg_masks.append(outputs_seg_masks[i_attn - 1] +
-                                         F.interpolate(attn, size=size, mode='linear', align_corners=False))
-
-        out["pred_masks"] = F.interpolate(outputs_seg_masks[-1],
-                                          size=self.data_size[1],
-                                          mode='linear', align_corners=False)
-
-        out["pred"] = self.semantic_inference(out["pred_logits"], out["pred_masks"])
-
-        return out
+        return {
+            "pred_logits": pred_logits,
+            "pred_masks": pred_masks,
+            "pred": pred,
+        }
 
     def semantic_inference(self, mask_cls, mask_pred):
-        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]
-        mask_pred = mask_pred.sigmoid()
-        semseg = torch.einsum("bqc,bql->bcl", mask_cls, mask_pred)
+        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # (B, N, num_classes)
+        mask_pred = mask_pred.sigmoid()                  # (B, N, L)
+        semseg = torch.einsum("bnc,bnl->bcl", mask_cls, mask_pred)
         return semseg
+
 
 
 # ------------------------------
@@ -437,12 +381,12 @@ class SegViT(nn.Module):
         enc_d_model: int = 128,
         enc_d_ff: int = 64,
         enc_n_heads: int = 8,
-        enc_n_layers: int = 1,
+        enc_n_layers: int = 5,
         enc_dropout: float = 0.1,
         enc_drop_path_rate: float = 0.0,
         dec_d_model: int = 128,
         dec_n_heads: int = 8,
-        dec_n_layers: int = 1,
+        dec_n_layers: int = 2,
     ):
         super().__init__()
         self.n_cls = n_cls
@@ -464,24 +408,21 @@ class SegViT(nn.Module):
         )
 
         self.decoder = ATMHead(
-            data_size=data_size,
             in_channels=enc_d_model,
             num_classes=n_cls,
-            embed_dims=dec_d_model,
+            embed_dim=dec_d_model,
             num_layers=dec_n_layers,
             num_heads=dec_n_heads,
-            use_stages=1,
         )
 
     def forward(self, x: Tensor) -> torch.Tensor:
-        print(x.shape)
         x = self.norm(x)
         x = torch.unsqueeze(x, 2)  # (2, 3, 1, 3000)
 
         x = self.encoder(x, return_features=True)
         x = x[:, 1:]  # remove CLS tokens
 
-        out = self.decoder([x])
+        out = self.decoder(x)
 
         return out
 
@@ -495,7 +436,7 @@ if __name__ == "__main__":
         enc_d_model=128,
         enc_d_ff=64,
         enc_n_heads=4,
-        enc_n_layers=1,
+        enc_n_layers=5,
         dec_d_model=256,
         dec_n_heads=8,
         dec_n_layers=2,
