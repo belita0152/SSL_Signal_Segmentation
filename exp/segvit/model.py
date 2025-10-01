@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 from torch import Tensor
 from typing import Tuple, Optional
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
@@ -177,7 +176,7 @@ class VisionTransformer(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)  # torch.Size([1, 1, 128])
         x = torch.cat((cls_tokens, x), dim=1)  # torch.Size([1024, 151, 128])
 
-        x = x + self.pos_embed  # torch.Size([1, 51, 128])
+        x = x + self.pos_embed
         x = self.dropout(x)
 
         for blk in self.blocks:
@@ -331,40 +330,30 @@ class ATMHead(nn.Module):
         self.class_embed = nn.Linear(embed_dim, num_classes + 1)
 
     def forward(self, inputs: torch.Tensor):
-        B, L, C = inputs.shape
+        B, L, C = inputs.shape  # torch.Size([2, 150, 128])
 
         # (1) projection
         enc_memory = self.input_proj(inputs)
-        enc_memory = self.proj_norm(enc_memory)
+        enc_memory = self.proj_norm(enc_memory)  # torch.Size([2, 150, 256])
 
         # (2) query init
         q = self.q_embed.weight.unsqueeze(1).repeat(1, B, 1)
 
         # (3) transformer decoder
-        q, attn = self.decoder(q, enc_memory)
+        q, mask = self.decoder(q, enc_memory)
         q = q.transpose(0, 1)
 
-        # (4) class prediction
-        pred_logits = self.class_embed(q)
+        # (4) class prediction (FC in diagram)
+        pred_logits = self.class_embed(q).squeeze(-1)
 
-        # (5) mask prediction
-        pred_masks = attn
+        # (5) generate masks
+        norm_encoder_features = F.normalize(inputs, p=2, dim=-1)  # torch.Size([2, 150, 128])
+        norm_class_queries = F.normalize(q, p=2, dim=-1)  # torch.Size([2, 3, 256])
 
-        # (6) inference mode
-        pred = self.semantic_inference(pred_logits, pred_masks)
+        mask_logits = norm_encoder_features @ norm_class_queries.transpose(1, 2)
 
-        return {
-            "pred_logits": pred_logits,
-            "pred_masks": pred_masks,
-            "pred": pred,
-        }
 
-    def semantic_inference(self, mask_cls, mask_pred):
-        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # (B, N, num_classes)
-        mask_pred = mask_pred.sigmoid()                  # (B, N, L)
-        semseg = torch.einsum("bnc,bnl->bcl", mask_cls, mask_pred)
-        return semseg
-
+        return mask
 
 
 # ------------------------------
@@ -377,7 +366,7 @@ class SegViT(nn.Module):
         n_cls: int,
         data_size: Tuple[int, int] = (1, 3000),
         patch_size: Tuple[int, int] = (1, 10),
-        channels: int = 3,
+        channels: int = 2,
         enc_d_model: int = 128,
         enc_d_ff: int = 64,
         enc_n_heads: int = 8,
@@ -416,15 +405,20 @@ class SegViT(nn.Module):
         )
 
     def forward(self, x: Tensor) -> torch.Tensor:
+        x0 = x.shape[-1]
+
         x = self.norm(x)
         x = torch.unsqueeze(x, 2)  # (2, 3, 1, 3000)
 
         x = self.encoder(x, return_features=True)
         x = x[:, 1:]  # remove CLS tokens
 
-        out = self.decoder(x)
+        mask_logits = self.decoder(x)
 
-        return out
+        if mask_logits.shape[-1] != x.shape[-1]:  # Use padded length for interpolation
+            mask_logits = F.interpolate(mask_logits, size=x0, mode="linear", align_corners=False)
+
+        return mask_logits
 
 
 if __name__ == "__main__":
@@ -437,14 +431,12 @@ if __name__ == "__main__":
         enc_d_ff=64,
         enc_n_heads=4,
         enc_n_layers=5,
-        dec_d_model=256,
+        dec_d_model=128,
         dec_n_heads=8,
         dec_n_layers=2,
     )
 
     x = torch.randn(2, 3, 3000)
     output = model(x)  # dict_keys(['pred_logits', 'pred_masks', 'pred'])
+    print(output.shape)
 
-    print(output['pred_logits'].size())
-    print(output['pred_masks'].size())
-    print(output['pred'].shape)
