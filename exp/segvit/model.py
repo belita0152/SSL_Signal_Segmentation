@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, Optional
-from torch.nn import TransformerDecoder, TransformerDecoderLayer
+import math
 from timm.models.layers import DropPath, trunc_normal_
 
 
@@ -12,6 +12,17 @@ from timm.models.layers import DropPath, trunc_normal_
 #           return (train_dataset, eval_dataset), (channel_num, class_num)
 # ------------------------------
 
+def get_1d_sincos_pos_embed(embed_dim: int, t_len: int) -> torch.Tensor:
+    """Standard 1D sine-cos positional embedding. Returns (1, T, C)."""
+    assert embed_dim % 2 == 0, "embed_dim must be even for sin/cos."
+    position = torch.arange(t_len).float()
+    div_term = torch.exp(
+        torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim)
+    )
+    pe = torch.zeros(t_len, embed_dim)
+    pe[:, 0::2] = torch.sin(position[:, None] * div_term[None, :])
+    pe[:, 1::2] = torch.cos(position[:, None] * div_term[None, :])
+    return pe.unsqueeze(0)
 
 class PatchEmbedding(nn.Module):
     def __init__(
@@ -152,9 +163,9 @@ class VisionTransformer(nn.Module):
 
         # cls and pos tokens
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.pos_embed = nn.Parameter(
-            torch.randn(1, self.patch_embed.num_patches + 1, d_model)
-        )
+        # self.pos_embed = nn.Parameter(
+        #     torch.randn(1, self.patch_embed.num_patches + 1, d_model)
+        # )
 
         # transformer blocks
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, n_layers)]
@@ -166,7 +177,6 @@ class VisionTransformer(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, n_cls)
 
-        trunc_normal_(self.pos_embed, std=0.02)
         trunc_normal_(self.cls_token, std=0.02)
 
     def forward(self, x: torch.Tensor, return_features: bool = False) -> torch.Tensor:
@@ -176,7 +186,9 @@ class VisionTransformer(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)  # torch.Size([1, 1, 128])
         x = torch.cat((cls_tokens, x), dim=1)  # torch.Size([1024, 151, 128])
 
-        x = x + self.pos_embed
+        x_len = x.shape[1]
+        pe = get_1d_sincos_pos_embed(self.d_model, x_len).to(x.device)
+        x = x + pe
         x = self.dropout(x)
 
         for blk in self.blocks:
@@ -196,164 +208,145 @@ class VisionTransformer(nn.Module):
 #           return (mask, updated_class_tokens)
 # ------------------------------
 
-class Attention_(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+class CrossAttention1D(nn.Module):
+    def __init__(self, dim, num_heads=8, attn_drop=0., proj_drop=0.0):
         super().__init__()
         self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
 
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)  # q 따로
-        self.k = nn.Linear(dim, dim, bias=qkv_bias)  # k 따로
-        self.v = nn.Linear(dim, dim, bias=qkv_bias)  # v 따로
+        self.q = nn.Linear(dim, dim, bias=True)  # q 따로
+        self.k = nn.Linear(dim, dim, bias=True)  # k 따로
+        self.v = nn.Linear(dim, dim, bias=True)  # v 따로
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, xq, xk, xv):
-        B, Nq, C = xq.transpose(0, 1).shape
-        Nk = xk.size()[1]
-        Nv = xv.size()[1]
+        B, Nq, C = xq.shape
+        Nk = xk.shape[1]
+        Nv = xv.shape[1]
 
-        q = self.q(xq).reshape(B, Nq, self.num_heads,
-                                      C // self.num_heads).permute(0, 2, 1, 3)
-        k = self.k(xk).reshape(B, Nk, self.num_heads,
-                                      C // self.num_heads).permute(0, 2, 1, 3)
-        v = self.v(xv).reshape(B, Nv, self.num_heads,
-                                      C // self.num_heads).permute(0, 2, 1, 3)
+        q = self.q(xq).reshape(B, Nq, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        k = self.k(xk).reshape(B, Nk, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        v = self.v(xv).reshape(B, Nv, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn_save = attn.clone()  # softmax 전의 sim map 저장 -> sigmoid/aggregation 해서 segmentation mask로 활용
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x.transpose(0, 1), attn_save.sum(dim=1) / self.num_heads  # 반환되는 attn은 평균된 raw sim => mask prediction
+        out = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
+        out = self.proj(out)
+        out = self.proj_drop(out)
+        return out, attn_save.sum(dim=1) / self.num_heads  # 반환되는 attn은 평균된 raw sim => mask prediction
 
 
-class TPN_DecoderLayer(TransformerDecoderLayer):
-    def __init__(self, **kwargs):
-        super(TPN_DecoderLayer, self).__init__(**kwargs)
-        del self.multihead_attn
-        self.multihead_attn = Attention_(
-            kwargs['d_model'], num_heads=kwargs['nhead'], qkv_bias=True, attn_drop=0.1
-        )  # 기본 Transformer Decoder의 Attention 모듈을 SegViT 모델에 맞게 교체
+class ATMModule(nn.Module):
+    def __init__(self,
+                 dim,
+                 num_heads,
+                 dropout,
+                 mlp_ratio=4.0,):
+        super().__init__()
+
+        self.self_attn = SelfAttention(dim, num_heads, dropout)
+        self.cross_attn = CrossAttention1D(dim, num_heads, attn_drop=0.1, proj_drop=0.0)
+
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(dim)
+
+        # FFN
+        hidden = int(dim * mlp_ratio)
+        self.fc1 = nn.Linear(dim, hidden)
+        self.activation = nn.GELU()
+        self.fc2 = nn.Linear(hidden, dim)
+
 
     def forward(
         self,
-        tgt: Tensor,
-        memory: Tensor,
-        tgt_mask: Optional[Tensor] = None,
-        memory_mask: Optional[Tensor] = None,
-        tgt_key_padding_mask: Optional[Tensor] = None,
-        memory_key_padding_mask: Optional[Tensor] = None,
-        tgt_is_causal: bool = False,
-        memory_is_causal: bool = False,
+        q: Tensor,
+        enc_features: Tensor,
     ) -> Tuple:
 
+        # ATM Module
         # (1) masked self-attention (decoder 내부 q 토큰끼리)
-        tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask,  # q=k=v : tgt (class tokens, decoder의 입력 토큰)
-                              key_padding_mask=tgt_key_padding_mask)[0]
-        tgt = tgt + self.dropout1(tgt2)
-        tgt = self.norm1(tgt)
+        q = self.norm(q)
+        q1, _ = self.self_attn(q)  # q=k=v : tgt (class tokens, decoder의 입력 토큰)
+        q = q + self.dropout(q1)
+        q = self.norm(q)
 
-        # (2) cross-attention (q=class tokens, key/values=encoder memory)
-        tgt2, attn2 = self.multihead_attn(tgt, memory, memory)
-        tgt = tgt + self.dropout2(tgt2)
-        tgt = self.norm2(tgt)
+        # (2) cross-attention (q=class tokens, k/v=encoder features)
+        q2, attn2 = self.cross_attn(q, enc_features, enc_features)
+        q = q + self.dropout(q2)
+        q = self.norm(q)
 
         # (3) FFN
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
-        tgt = tgt + self.dropout3(tgt2)
-        tgt = self.norm3(tgt)
+        q2 = self.fc2(self.dropout(self.activation(self.fc1(q))))
+        q = q + self.dropout(q2)
+        q = self.norm(q)
 
-        return tgt, attn2
-
-
-class TPN_Decoder(TransformerDecoder):
-    def forward(
-        self,
-        tgt: Tensor,  # query (class tokens)
-        memory: Tensor,  # key/value (encoder에서 나온 patch-level feature tokens)
-        tgt_mask: Optional[Tensor] = None,
-        memory_mask: Optional[Tensor] = None,
-        tgt_key_padding_mask: Optional[Tensor] = None,
-        memory_key_padding_mask: Optional[Tensor] = None,
-        tgt_is_causal: Optional[bool] = None,
-        memory_is_causal: bool = False,
-    ) -> Tuple:
-
-        output = tgt
-        # attns = []
-        for mod in self.layers:
-            output, attn = mod(output, memory, tgt_mask=tgt_mask,
-                         memory_mask=memory_mask,
-                         tgt_key_padding_mask=tgt_key_padding_mask,
-                         memory_key_padding_mask=memory_key_padding_mask)  # Decoder layers
-            # attns.append(attn)  # 각 layer별 raw sim map
-
-        if self.norm is not None:
-            output = self.norm(output)
-
-        return output, attn  # 실제 구현에서는 마지막 decoder layer의 sim map을 사용
+        return q, attn2
 
 
-# ATM Module
 class ATMHead(nn.Module):
     def __init__(
             self,
             in_channels: int,
             num_classes: int,
             embed_dim: int,
-            num_layers: int = 2,
+            num_layers: int = 3,
             num_heads: int = 8,
     ):
 
         super().__init__()
         self.in_channels = in_channels
         self.num_classes = num_classes
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
 
         # Encoder output dim -> Decoder input dim
         self.input_proj = nn.Linear(in_channels, embed_dim)
         self.proj_norm = nn.LayerNorm(embed_dim)
 
-        # Transformer decoder
-        decoder_layer = TPN_DecoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=embed_dim * 4)
-        self.decoder = TPN_Decoder(decoder_layer, num_layers)
+        # Transformer decoder layers
+        self.layers = nn.ModuleList([
+            ATMModule(dim=self.embed_dim, num_heads=self.num_heads, dropout=0.1)
+            for _ in range(num_layers)
+        ])
 
-        # Learnable class queries
-        self.q_embed = nn.Embedding(num_classes, embed_dim)
+        self.class_prediction_head = nn.Linear(embed_dim, self.num_classes+1)  # github는 nn.Linear(dim, self.num_classes + 1)
 
         # Final classification (class embedding)
         self.class_embed = nn.Linear(embed_dim, num_classes + 1)
 
-    def forward(self, inputs: torch.Tensor):
-        B, L, C = inputs.shape  # torch.Size([2, 150, 128])
+    def forward(self, queries, enc_features: torch.Tensor):
+        B, L, C = enc_features.shape  # torch.Size([2, 150, 128])
 
         # (1) projection
-        enc_memory = self.input_proj(inputs)
-        enc_memory = self.proj_norm(enc_memory)  # torch.Size([2, 150, 256])
+        enc_features = self.input_proj(enc_features)
+        enc_features = self.proj_norm(enc_features)
 
-        # (2) query init
-        q = self.q_embed.weight.unsqueeze(1).repeat(1, B, 1)
+        # (2) transformer decoder
+        qs, masks = [], []
+        for layer in self.layers:
+            q, mask = layer(queries, enc_features)
+            qs.append(q.transpose(0, 1))
+            masks.append(mask)
 
-        # (3) transformer decoder
-        q, mask = self.decoder(q, enc_memory)
-        q = q.transpose(0, 1)
+        qs = torch.stack(qs, dim=0)
 
         # (4) class prediction (FC in diagram)
-        pred_logits = self.class_embed(q).squeeze(-1)
+        output_class = self.class_prediction_head(qs).squeeze(-1)
+        class_logits = output_class[-1]
 
         # (5) generate masks
-        norm_encoder_features = F.normalize(inputs, p=2, dim=-1)  # torch.Size([2, 150, 128])
-        norm_class_queries = F.normalize(q, p=2, dim=-1)  # torch.Size([2, 3, 256])
+        norm_encoder_features = F.normalize(enc_features, p=2, dim=-1)
+        norm_class_queries = F.normalize(q, p=2, dim=-1)  # final output from ATM module
 
         mask_logits = norm_encoder_features @ norm_class_queries.transpose(1, 2)
 
-
-        return mask
+        return class_logits, mask_logits
 
 
 # ------------------------------
@@ -379,10 +372,12 @@ class SegViT(nn.Module):
     ):
         super().__init__()
         self.n_cls = n_cls
+        self.enc_d_model = enc_d_model
         self.data_size = data_size
         self.patch_size = patch_size
         self.norm = nn.BatchNorm1d(channels, affine=True)
 
+        # 1. Backbone (ViT Encoder)
         self.encoder = VisionTransformer(  # heartbeat -> 625 / ahi -> 3000
             data_size=data_size,
             patch_size=patch_size,
@@ -396,6 +391,10 @@ class SegViT(nn.Module):
             channels=channels,
         )
 
+        # Learnable class queries
+        self.class_queries = nn.Parameter(torch.randn(self.n_cls, self.enc_d_model))
+
+        # 2. ATM Decoder Head
         self.decoder = ATMHead(
             in_channels=enc_d_model,
             num_classes=n_cls,
@@ -410,10 +409,13 @@ class SegViT(nn.Module):
         x = self.norm(x)
         x = torch.unsqueeze(x, 2)  # (2, 3, 1, 3000)
 
-        x = self.encoder(x, return_features=True)
-        x = x[:, 1:]  # remove CLS tokens
+        enc_features = self.encoder(x, return_features=True)
+        enc_features = enc_features[:, 1:]  # remove CLS tokens
 
-        mask_logits = self.decoder(x)
+        batch_class_queries = self.class_queries.unsqueeze(0).repeat(x.shape[0], 1, 1)
+
+        _, mask_logits = self.decoder(batch_class_queries, enc_features)
+        mask_logits = mask_logits.transpose(1, 2)
 
         if mask_logits.shape[-1] != x.shape[-1]:  # Use padded length for interpolation
             mask_logits = F.interpolate(mask_logits, size=x0, mode="linear", align_corners=False)
@@ -439,4 +441,3 @@ if __name__ == "__main__":
     x = torch.randn(2, 3, 3000)
     output = model(x)  # dict_keys(['pred_logits', 'pred_masks', 'pred'])
     print(output.shape)
-
