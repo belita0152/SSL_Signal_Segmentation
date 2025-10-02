@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
-
+import math
 from timm.models.layers import DropPath, trunc_normal_
 from einops import rearrange
 
@@ -11,9 +11,20 @@ from einops import rearrange
 #         return (train_dataset, eval_dataset), (channel_num, class_num)
 # -----------------------------------------------------------------------------
 
-class PatchEmbedding(nn.Module):
-    """Overlapping/non-overlapping patch embedding for 1D signals."""
+def get_1d_sincos_pos_embed(embed_dim: int, t_len: int) -> torch.Tensor:
+    """Standard 1D sine-cos positional embedding. Returns (1, T, C)."""
+    assert embed_dim % 2 == 0, "embed_dim must be even for sin/cos."
+    position = torch.arange(t_len).float()
+    div_term = torch.exp(
+        torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim)
+    )
+    pe = torch.zeros(t_len, embed_dim)
+    pe[:, 0::2] = torch.sin(position[:, None] * div_term[None, :])
+    pe[:, 1::2] = torch.cos(position[:, None] * div_term[None, :])
+    return pe.unsqueeze(0)
 
+
+class PatchEmbed1D(nn.Module):
     def __init__(
             self,
             data_size: Tuple[int, int],
@@ -142,7 +153,7 @@ class VisionTransformer(nn.Module):
         channels: int = 1,
     ):
         super().__init__()
-        self.patch_embed = PatchEmbedding(data_size, patch_size, d_model, channels)
+        self.patch_embed = PatchEmbed1D(data_size, patch_size, d_model, channels)
         self.n_layers = n_layers
         self.d_model = d_model
         self.d_ff = d_ff
@@ -154,7 +165,7 @@ class VisionTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         self.pos_embed = nn.Parameter(
             torch.randn(1, self.patch_embed.num_patches + 1, d_model)
-        )
+        )  # learnable position embeddings
 
         # transformer blocks
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, n_layers)]
@@ -176,7 +187,9 @@ class VisionTransformer(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)  # torch.Size([1, 1, 128])
         x = torch.cat((cls_tokens, x), dim=1)  # torch.Size([1024, 151, 128])
 
-        x = x + self.pos_embed  # torch.Size([1, 51, 128])
+        x_len = x.shape[1]
+        pe = get_1d_sincos_pos_embed(self.d_model, x_len).to(x.device)
+        x = x + pe
         x = self.dropout(x)
 
         for blk in self.blocks:
