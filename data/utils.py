@@ -116,8 +116,8 @@ def get_dataset(name: str):
 
     elif name == 'heartsound':
         from data.data_loader import HeartSoundDataset
-        channel_num = 1    # [EMG_1, EMG_2, EMG_3, ... ]
-        class_num = 4      # [0: normal, 1: not normal]
+        channel_num = 1    # [HeartSound]
+        class_num = 4      # [0: s1, 1: systole, 2: s2, 3: diastole]
         train_dataset = HeartSoundDataset(
             base_path='/data/segmentation/heartsound_f2',
             fs=500,
