@@ -261,8 +261,8 @@ class NinaproDataset(SlidingWindowDataset):
             window_sec=second,
             step_sec=sliding_window_sec,
         )
-        self.channel_num = 3
-        self.class_num = 2
+        self.channel_num = 12
+        self.class_num = 5
 
     def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         """
@@ -284,33 +284,34 @@ class NinaproDataset(SlidingWindowDataset):
         data_np = {k: self.data_dict[k][idx] for k in self.signal_cols}
         mask_np = self.mask_arr[idx]
 
-        mask_np[mask_np > 0] = 1    # TODO : 0 / 1
-        # # -----------------------------
-        # hand_open_labels = [6]
-        # hand_close_labels = [5, 22, 23, 24, 25]
-        # pinch_labels = [7, 8, 9, 10, 18, 19, 20, 21, 32]
-        # wrist_labels = [12, 13, 14]
-        #
-        # conditions = [
-        #     np.isin(mask_np, hand_open_labels),
-        #     np.isin(mask_np, hand_close_labels),
-        #     np.isin(mask_np, pinch_labels),
-        #     np.isin(mask_np, wrist_labels),
-        # ]
-        #
-        # choices = [1, 2, 3, 4]
-        # y_remapped = np.select(conditions, choices, default=-1)
-        # y_remapped[mask_np == 0] = 0  # 휴식 클래스(0)는 확실하게 0으로 지정
-        #
-        # # mask_np[mask_np == 4] = 2
-        # # mask_np[mask_np == 5] = 0
-        # # mask_np[mask_np == 6] = 0
-        # # mask_np[mask_np == 7] = 0
-        # mask_np = y_remapped
+        # mask_np[mask_np > 0] = 1    # TODO : 0 / 1
+        # -----------------------------
+        hand_open_labels = [6]
+        hand_close_labels = [5, 22, 23, 24, 25]
+        pinch_labels = [7, 8, 9, 10, 18, 19, 20, 21, 32]
+        wrist_labels = [12, 13, 14]
+
+        conditions = [
+            np.isin(mask_np, hand_open_labels),
+            np.isin(mask_np, hand_close_labels),
+            np.isin(mask_np, pinch_labels),
+            np.isin(mask_np, wrist_labels),
+        ]
+
+        choices = [1, 2, 3, 4]
+        y_remapped = np.select(conditions, choices, default=-1)
+        y_remapped[mask_np == 0] = 0  # 휴식 클래스(0)는 확실하게 0으로 지정
+
+        # mask_np[mask_np == 4] = 2
+        # mask_np[mask_np == 5] = 0
+        # mask_np[mask_np == 6] = 0
+        # mask_np[mask_np == 7] = 0
+        mask_np = y_remapped
 
         data = {k: torch.tensor(v, dtype=torch.float32) for k, v in data_np.items()}
         mask = torch.tensor(mask_np, dtype=torch.long)
         return data, mask
+
 
 
 class HeartSoundDataset(SlidingWindowDataset):
@@ -335,7 +336,7 @@ class HeartSoundDataset(SlidingWindowDataset):
             step_sec=sliding_window_sec,
         )
         self.channel_num = 3
-        self.class_num = 2
+        self.class_num = 4  # [0: s1, 1: systole, 2: s2, 3: diastole]
 
     def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         data_np = {k: self.data_dict[k][idx] for k in self.signal_cols}
