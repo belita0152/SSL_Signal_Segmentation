@@ -6,11 +6,10 @@ import warnings
 from typing import Tuple, Dict
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from utils import metric
-from exp.segvit_.model import SegViT1D
+from SegViT.model import SegViT
 from data.utils import get_dataset
 from utils.loss import CrossEntropyDiceLoss
 
@@ -31,8 +30,8 @@ def to_device(batch_x: torch.Tensor, device: torch.device) -> torch.Tensor:
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset_name', default='heartbeat', choices=['heartsound', 'heartbeat', 'ahi'])
-    parser.add_argument('--save_path', type=str, default=os.path.join('..', '..', 'result'))
+    parser.add_argument('--dataset_name', default='ahi', choices=['heartbeat', 'ahi', 'gesture', 'heartsound'])
+    parser.add_argument('--save_path', type=str, default=os.path.join('..', 'result'))
 
     parser.add_argument('--epochs', default=100, type=int)
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -55,24 +54,23 @@ class Trainer(object):
         (self.train_loader, self.eval_loader), (self.channel_num, self.class_num) = self._build_dataloaders()
 
         # Model
-        self.model = SegViT1D(
-            in_channels=self.channel_num,
-            embed_dim=128,
-            depth=10,
-            num_heads=8,
-            mlp_ratio=4.0,
-            drop_rate=0.0,
-            attn_drop_rate=0.0,
-            drop_path_rate=0.1,
-            patch_size=20,
-            use_overlap=True,
-            num_classes=self.class_num,
+        self.model = SegViT(
+            n_cls=3,
+            data_size=(1, 3000),
+            patch_size=(1, 20),
+            channels=3,
+            enc_d_model=128,
+            enc_d_ff=64,
+            enc_n_heads=4,
+            enc_n_layers=5,
+            dec_d_model=128,
+            dec_n_heads=8,
+            dec_n_layers=2,
         ).to(self.device)
 
         self.optimizer = optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=args.epochs)
-        # self.criterion = CrossEntropyDiceLoss()
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = CrossEntropyDiceLoss()
         self.scaler = torch.cuda.amp.GradScaler()
 
     def _make_input(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
