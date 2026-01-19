@@ -12,7 +12,7 @@ from model import Segmenter
 from data.utils import get_dataset
 from utils.loss import CrossEntropyDiceLoss
 import utils.metric as metric
-import json
+from utils.utils import save_best_model, save_experiment_results, print_best_results
 
 
 warnings.filterwarnings("ignore")
@@ -50,23 +50,29 @@ class Trainer(object):
         self.args = args
         self.device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
 
+        self.save_path = os.path.join(args.save_path, args.dataset_name)
+
         # Data Loader
         (self.train_loader, self.eval_loader), (self.channel_num, self.class_num) = self._build_dataloaders()
+        # ignore_index = -1 if args.dataset_name.lower() == "gesture" else 0
 
         # Model
+        self.model_cfg = {
+            'n_cls': self.class_num,
+            'data_size': (1, 3000),
+            'patch_size': (1, 20),
+            'channels': self.channel_num,
+            'enc_d_model': 128,
+            'enc_d_ff': 64,
+            'enc_n_heads': 4,
+            'enc_n_layers': 12,
+            'dec_d_model': 128,
+            'dec_d_ff': 128,
+            'dec_n_heads': 8,
+            'dec_n_layers': 2,
+        }
         self.model = Segmenter(
-            n_cls=self.class_num,
-            data_size=(1, 3000),
-            patch_size=(1, 20),
-            channels=self.channel_num,
-            enc_d_model=128,
-            enc_d_ff=64,
-            enc_n_heads=4,
-            enc_n_layers=12,
-            dec_d_model=128,
-            dec_d_ff=128,
-            dec_n_heads=8,
-            dec_n_layers=2,
+            **self.model_cfg,
         ).to(self.device)
 
         self.optimizer = optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -135,14 +141,44 @@ class Trainer(object):
 
     def run(self):
         results = []
+        best_iou = 0.0
+        best_overall_stats = {
+            'epoch': 0,
+            'accuracy': 0.0,
+            'iou_macro': 0.0,
+            'dice_macro': 0.0
+        }
+
         for epoch in range(1, self.args.epochs + 1):
             self.train_one_epoch(epoch)
             result = self.eval_one_epoch(epoch)
+
+            result['epoch'] = epoch
             results.append(result)
 
-        file_path = os.path.join(args.save_path, args.dataset_name, 'segmenter.json')
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=4)
+            if result['iou_macro'] > best_iou:
+                best_iou = result['iou_macro']
+                best_overall_stats = result
+                save_best_model(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    epoch=epoch,
+                    iou=best_iou,
+                    save_dir=self.save_path,
+                    model_name='segmenter'
+                )
+
+        # Save hyperparameters
+        save_experiment_results(
+            args=self.args,
+            results=results,
+            best_iou=best_iou,
+            model_config=self.model_cfg,  # settings
+            save_dir=self.save_path,
+            model_name='segmenter'
+        )
+
+        print_best_results(best_overall_stats)
 
 
 if __name__ == '__main__':
