@@ -13,6 +13,7 @@ from utils import metric
 from exp.unet.model import UNet1D
 from data.utils import get_dataset
 from utils.loss import CrossEntropyDiceLoss
+from utils.utils import save_best_model, save_experiment_results, print_best_results
 
 warnings.filterwarnings('ignore')
 
@@ -31,12 +32,12 @@ def to_device(batch_x: torch.Tensor, device: torch.device) -> torch.Tensor:
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset_name', default='heartbeat', choices=['heartbeat', 'ahi'])
-    parser.add_argument('--save_path', type=str, default=os.path.join('..', '..', 'result'))
+    parser.add_argument('--dataset_name', default='gesture', choices=['heartbeat', 'ahi', 'gesture', 'heartsound'])
+    parser.add_argument('--save_path', type=str, default=os.path.join('..', 'result'))
 
     parser.add_argument('--epochs', default=100, type=int)
-    parser.add_argument('--lr', default=1e-4, type=float)
-    parser.add_argument('--batch_size', default=1024, type=int)
+    parser.add_argument('--lr', default=1e-3, type=float)
+    parser.add_argument('--batch_size', default=512, type=int)
     parser.add_argument('--ce_dice_alpha', default=0.7, type=float)
     parser.add_argument('--weight_decay', default=1e-2, type=float)
     parser.add_argument('--grad_clip', default=1.0, type=float)
@@ -51,18 +52,24 @@ class Trainer(object):
         self.args = args
         self.device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
 
+        self.save_path = os.path.join(args.save_path, args.dataset_name)
+
         # Data Loader
         (self.train_loader, self.eval_loader), (self.channel_num, self.class_num) = self._build_dataloaders()
 
         # Model
+        self.model_cfg = {
+            'in_channels': self.channel_num,
+            'out_channels': self.class_num,
+            'stem_channels': 32,
+            'stage_channels': (32, 64, 128, 128),
+            'stage_blocks': (2, 2, 2, 1),
+            'stem_kernel': 50,  # Hz / 4
+            'block_kernel': 25,  # Hz / 8
+        }
+
         self.model: nn.Module = UNet1D(
-            in_channels=self.channel_num,
-            out_channels=self.class_num,
-            stem_channels=32,
-            stage_channels=(32, 64, 128, 128),
-            stage_blocks=(2, 2, 2, 1),
-            stem_kernel=11,
-            block_kernel=5,
+            **self.model_cfg,
         ).to(self.device)
 
         self.optimizer = optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -130,14 +137,42 @@ class Trainer(object):
 
     def run(self):
         results = []
+        best_iou = 0.0
+        best_overall_stats = {
+            'epoch': 0,
+            'accuracy': 0.0,
+            'iou_macro': 0.0,
+            'dice_macro': 0.0
+        }
+
         for epoch in range(1, self.args.epochs + 1):
             self.train_one_epoch(epoch)
             result = self.eval_one_epoch(epoch)
             results.append(result)
 
-        file_path = os.path.join(args.save_path, args.dataset_name, 'unet.json')
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=4)
+            if result['iou_macro'] > best_iou:
+                best_iou = result['iou_macro']
+                best_overall_stats = result
+                save_best_model(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    epoch=epoch,
+                    iou=best_iou,
+                    save_dir=self.save_path,
+                    model_name='segmenter'
+                )
+
+        # Save hyperparameters
+        save_experiment_results(
+            args=self.args,
+            results=results,
+            best_iou=best_iou,
+            model_config=self.model_cfg,  # settings
+            save_dir=self.save_path,
+            model_name='segmenter'
+        )
+
+        print_best_results(best_overall_stats)
 
 
 if __name__ == '__main__':
